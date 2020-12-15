@@ -1,0 +1,182 @@
+Predict Shakespeare with Cloud TPUs and Keras
+Overview
+This example uses tf.keras to build a language model and train it on a Cloud TPU. This language model predicts the next character of text given the text so far. The trained model can generate new snippets of text that read in a similar style to the text training data.
+
+The model trains for 10 epochs and completes in approximately 5 minutes.
+
+This notebook is hosted on GitHub. To view it in its original repository, after opening the notebook, select File > View on GitHub.
+
+Learning objectives
+In this Colab, you will learn how to:
+
+Build a two-layer, forward-LSTM model.
+Convert a tf.keras model to an equivalent TPU version and then use the standard Keras methods to train: fit, predict, and evaluate.
+Use the trained model to make predictions and generate your own Shakespeare-esque play.
+Instructions
+  Train on TPU   
+On the main menu, click Runtime and select Change runtime type. Set "TPU" as the hardware accelerator.
+Click Runtime again and select Runtime > Run All. You can also run the cells manually with Shift-ENTER.
+TPUs are located in Google Cloud, for optimal performance, they read data directly from Google Cloud Storage (GCS)
+
+Data, model, and training
+In this example, you train the model on the combined works of William Shakespeare, then use the model to compose a play in the style of The Great Bard:
+
+Loves that led me no dumbs lack her Berjoy's face with her to-day.
+The spirits roar'd; which shames which within his powers
+Which tied up remedies lending with occasion,
+A loud and Lancaster, stabb'd in me
+Upon my sword for ever: 'Agripo'er, his days let me free.
+Stop it of that word, be so: at Lear,
+When I did profess the hour-stranger for my life,
+When I did sink to be cried how for aught;
+Some beds which seeks chaste senses prove burning;
+But he perforces seen in her eyes so fast;
+And _
+Download data
+Download The Complete Works of William Shakespeare as a single text file from Project Gutenberg. You use snippets from this file as the training data for the model. The target snippet is offset by one character.
+
+[ ]
+
+!wget --show-progress --continue -O /content/shakespeare.txt http://www.gutenberg.org/files/100/100-0.txt
+Build the data generator
+[ ]
+
+import numpy as np
+import six
+import tensorflow as tf
+import time
+import os
+
+# This address identifies the TPU we'll use when configuring TensorFlow.
+TPU_WORKER = 'grpc://' + os.environ['COLAB_TPU_ADDR']
+
+SHAKESPEARE_TXT = '/content/shakespeare.txt'
+
+tf.logging.set_verbosity(tf.logging.INFO)
+
+def transform(txt, pad_to=None):
+  # drop any non-ascii characters
+  output = np.asarray([ord(c) for c in txt if ord(c) < 255], dtype=np.int32)
+  if pad_to is not None:
+    output = output[:pad_to]
+    output = np.concatenate([
+        np.zeros([pad_to - len(txt)], dtype=np.int32),
+        output,
+    ])
+  return output
+
+def training_generator(seq_len=100, batch_size=1024):
+  """A generator yields (source, target) arrays for training."""
+  with tf.gfile.GFile(SHAKESPEARE_TXT, 'r') as f:
+    txt = f.read()
+
+  tf.logging.info('Input text [%d] %s', len(txt), txt[:50])
+  source = transform(txt)
+  while True:
+    offsets = np.random.randint(0, len(source) - seq_len, batch_size)
+
+    # Our model uses sparse crossentropy loss, but Keras requires labels
+    # to have the same rank as the input logits.  We add an empty final
+    # dimension to account for this.
+    yield (
+        np.stack([source[idx:idx + seq_len] for idx in offsets]),
+        np.expand_dims(
+            np.stack([source[idx + 1:idx + seq_len + 1] for idx in offsets]),
+            -1),
+    )
+
+six.next(training_generator(seq_len=10, batch_size=1))
+Build the model
+The model is defined as a two-layer, forward-LSTMwith two changes from the tf.keras standard LSTM definition:
+
+Define the input shape of the model to comply with the XLA compiler's static shape requirement.
+Use tf.train.Optimizer instead of a standard Keras optimizer (Keras optimizer support is still experimental).
+[ ]
+
+EMBEDDING_DIM = 512
+
+def lstm_model(seq_len=100, batch_size=None, stateful=True):
+  """Language model: predict the next word given the current word."""
+  source = tf.keras.Input(
+      name='seed', shape=(seq_len,), batch_size=batch_size, dtype=tf.int32)
+
+  embedding = tf.keras.layers.Embedding(input_dim=256, output_dim=EMBEDDING_DIM)(source)
+  lstm_1 = tf.keras.layers.LSTM(EMBEDDING_DIM, stateful=stateful, return_sequences=True)(embedding)
+  lstm_2 = tf.keras.layers.LSTM(EMBEDDING_DIM, stateful=stateful, return_sequences=True)(lstm_1)
+  predicted_char = tf.keras.layers.TimeDistributed(tf.keras.layers.Dense(256, activation='softmax'))(lstm_2)
+  model = tf.keras.Model(inputs=[source], outputs=[predicted_char])
+  model.compile(
+      optimizer=tf.train.RMSPropOptimizer(learning_rate=0.01),
+      loss='sparse_categorical_crossentropy',
+      metrics=['sparse_categorical_accuracy'])
+  return model
+Train the model
+The tf.contrib.tpu.keras_to_tpu_model function converts a tf.keras model to an equivalent TPU version. You then use the standard Keras methods to train: fit, predict, and evaluate.
+
+[ ]
+
+tf.keras.backend.clear_session()
+
+training_model = lstm_model(seq_len=100, batch_size=128, stateful=False)
+
+tpu_model = tf.contrib.tpu.keras_to_tpu_model(
+    training_model,
+    strategy=tf.contrib.tpu.TPUDistributionStrategy(
+        tf.contrib.cluster_resolver.TPUClusterResolver(TPU_WORKER)))
+
+tpu_model.fit_generator(
+    training_generator(seq_len=100, batch_size=1024),
+    steps_per_epoch=100,
+    epochs=10,
+)
+tpu_model.save_weights('/tmp/bard.h5', overwrite=True)
+Make predictions with the model
+Use the trained model to make predictions and generate your own Shakespeare-esque play. Start the model off with a seed sentence, then generate 250 characters from it. The model makes five predictions from the initial seed.
+
+[ ]
+
+BATCH_SIZE = 5
+PREDICT_LEN = 250
+
+# Keras requires the batch size be specified ahead of time for stateful models.
+# We use a sequence length of 1, as we will be feeding in one character at a 
+# time and predicting the next character.
+prediction_model = lstm_model(seq_len=1, batch_size=BATCH_SIZE, stateful=True)
+prediction_model.load_weights('/tmp/bard.h5')
+
+# We seed the model with our initial string, copied BATCH_SIZE times
+
+seed_txt = 'Looks it not like the king?  Verily, we must go! '
+seed = transform(seed_txt)
+seed = np.repeat(np.expand_dims(seed, 0), BATCH_SIZE, axis=0)
+
+# First, run the seed forward to prime the state of the model.
+prediction_model.reset_states()
+for i in range(len(seed_txt) - 1):
+  prediction_model.predict(seed[:, i:i + 1])
+
+# Now we can accumulate predictions!
+predictions = [seed[:, -1:]]
+for i in range(PREDICT_LEN):
+  last_word = predictions[-1]
+  next_probits = prediction_model.predict(last_word)[:, 0, :]
+  
+  # sample from our output distribution
+  next_idx = [
+      np.random.choice(256, p=next_probits[i])
+      for i in range(BATCH_SIZE)
+  ]
+  predictions.append(np.asarray(next_idx, dtype=np.int32))
+  
+
+for i in range(BATCH_SIZE):
+  print('PREDICTION %d\n\n' % i)
+  p = [predictions[j][i] for j in range(PREDICT_LEN)]
+  generated = ''.join([chr(c) for c in p])
+  print(generated)
+  print()
+  assert len(generated) == PREDICT_LEN, 'Generated text too short'
+What's next
+Learn about Cloud TPUs that Google designed and optimized specifically to speed up and scale up ML workloads for training and inference and to enable ML engineers and researchers to iterate more quickly.
+Explore the range of Cloud TPU tutorials and Colabs to find other examples that can be used when implementing your ML project.
+On Google Cloud Platform, in addition to GPUs and TPUs available on pre-configured deep learning VMs, you will find AutoML(beta) for training custom models without writing code and Cloud ML Engine which will allows you to run parallel trainings and hyperparameter tuning of your custom models on powerful distributed hardware.
