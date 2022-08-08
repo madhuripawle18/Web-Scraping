@@ -20,6 +20,6 @@
 
 5. Printed the common words in both files.
 
-6. Printed the top 15 words based on their frequency 
+6. Printed the top 15 words based on their frequency. 
 
 7. Printed the meaning of the words using the WordNet lexical database for English Language in Python. 
