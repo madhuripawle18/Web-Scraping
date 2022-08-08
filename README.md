@@ -1,13 +1,13 @@
 # Web-Scraping
 
-### AIM: 
+### Aim: 
 
 1. To scrape a HTML page and compare it with a text file to find common words in those two files. 
 2. To list the top 15 words used in both the files.
 3. To display the meaning of those words. 
 
 
-### PROCEDURE:
+### Procedure:
 
 1. Scraped a HTML file ("https://playground.tensorflow.org/") and store it as a text file using the BeautifulSoup Python package. 
 (BeautifulSoup is a Python package which is used to parse HTML and XML documents.)
